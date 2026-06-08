@@ -1,47 +1,21 @@
 # Alcorn MSG Quote Extractor
 
-Streamlit app to extract PDF quote attachments from Outlook `.msg` files, parse Alcorn quote data, and download one ZIP containing:
+Streamlit app to upload Outlook `.msg` files, extract attached quote PDFs, rename PDFs, extract Alcorn quote line items, and download one ZIP containing:
 
 - `alcorn_quote_extraction.xlsx`
-- renamed PDFs in `/pdf/`
+- `pdf/alcorn_YYYYMMDD_HHMMSS_mmm_###.pdf`
 
-## Key rules
+## Privacy / storage behavior
 
-- Uploaded `.msg` files are processed only during the Streamlit run.
-- PDFs are not saved permanently and no Streamlit cache is used.
-- PDFs inside the ZIP are renamed like:
+The app processes uploaded MSG files and PDF attachments in memory. It does not use `st.cache_data` or `st.cache_resource`, and it does not permanently store PDFs.
 
-```text
-alcorn_YYYYMMDD_HHMMSS_millisecond_001.pdf
-```
-
-- Excel headers are fixed in `FIXED_HEADERS` in `app.py`.
-- Generic item IDs like `MISC` and `PARTS & MISC` use the real customer item number when available.
-- One Excel row is created per actual PDF line item.
-- Notes such as lead times, `IN STOCK`, repair percentage, and vendor notes are not treated as separate rows.
-
-## Local setup
+## Run locally
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## GitHub deployment
+## Notes
 
-Upload these files to a GitHub repository:
-
-```text
-app.py
-requirements.txt
-README.md
-.gitignore
-```
-
-Then deploy the repository on Streamlit Community Cloud.
-
-## Output
-
-Click **Extract quotes and build ZIP** after uploading `.msg` files. The download ZIP contains the Excel file and all renamed PDF attachments.
+The extractor uses visual PDF column positions first, then falls back to text parsing. This fixes the issue where PDFs were found but 0 rows were extracted because the PDF text separated `Qty.` and `Ord.` into different text lines.

@@ -377,6 +377,115 @@ def extract_items(lines: List[str]) -> List[Dict[str, object]]:
     return rows
 
 
+
+def group_words_by_line(words, y_tol: float = 3.0):
+    """Group pdfplumber words into visual text lines by vertical position."""
+    lines = []
+    for w in sorted(words, key=lambda x: (x["top"], x["x0"])):
+        placed = False
+        for line in lines:
+            if abs(line["top"] - w["top"]) <= y_tol:
+                line["words"].append(w)
+                line["top"] = min(line["top"], w["top"])
+                placed = True
+                break
+        if not placed:
+            lines.append({"top": w["top"], "words": [w]})
+    for line in lines:
+        line["words"].sort(key=lambda x: x["x0"])
+        line["text"] = clean_text(" ".join(w["text"] for w in line["words"]))
+    return sorted(lines, key=lambda x: x["top"])
+
+
+def words_in_range(words, left: float, right: float) -> str:
+    return clean_text(" ".join(w["text"] for w in words if left <= w["x0"] < right))
+
+
+def extract_items_from_pdf_columns(pdf_bytes: bytes) -> List[Dict[str, object]]:
+    """Extract line items from the visual columns, not only raw text.
+
+    This is the primary parser. It handles the Alcorn table where pdf text may split
+    Qty. and Ord. into separate lines or move customer-item values onto wrapped lines.
+    """
+    all_rows: List[Dict[str, object]] = []
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
+            if not words:
+                continue
+            # Header and bottom of table.
+            qty_tops = [w["top"] for w in words if w["text"].lower().startswith("qty") and w["x0"] < 70]
+            tax_tops = [w["top"] for w in words if w["text"].lower().startswith("tax")]
+            header_y = min(qty_tops) if qty_tops else 260
+            bottom_y = min([y for y in tax_tops if y > header_y] or [page.height - 80])
+            table_words = [w for w in words if header_y + 15 <= w["top"] < bottom_y - 2]
+            lines = group_words_by_line(table_words)
+            # Visual column boundaries for US Letter Alcorn quote PDFs.
+            c_qty = (25, 55)
+            c_item = (55, 155)
+            c_customer = (155, 252)
+            c_desc = (252, 455)
+            c_unit = (455, 510)
+            c_ext = (510, 590)
+
+            row_indices = []
+            for idx, line in enumerate(lines):
+                qty_text = words_in_range(line["words"], *c_qty)
+                if re.fullmatch(r"\d+", qty_text):
+                    row_indices.append(idx)
+            row_indices.append(len(lines))
+
+            for pos in range(len(row_indices) - 1):
+                start, end = row_indices[pos], row_indices[pos + 1]
+                group = lines[start:end]
+                if not group:
+                    continue
+                first_words = group[0]["words"]
+                qty_text = words_in_range(first_words, *c_qty)
+                if not qty_text.isdigit():
+                    continue
+                qty = int(qty_text)
+                item_number = words_in_range(first_words, *c_item)
+                customer_parts = []
+                desc_parts = []
+                unit_price = None
+                total_sales = None
+
+                for line in group:
+                    ws = line["words"]
+                    cust = words_in_range(ws, *c_customer)
+                    desc = words_in_range(ws, *c_desc)
+                    unit = words_in_range(ws, *c_unit)
+                    ext = words_in_range(ws, *c_ext)
+                    if cust:
+                        customer_parts.append(cust)
+                    if desc and not should_ignore_note(desc):
+                        desc_parts.append(desc)
+                    if unit and MONEY_RE.match(unit):
+                        unit_price = money_to_float(unit)
+                    if ext and MONEY_RE.match(ext):
+                        total_sales = money_to_float(ext)
+
+                customer_item = clean_text(" ".join(customer_parts))
+                desc = clean_text(" ".join(desc_parts))
+                if not item_number and not customer_item and not desc:
+                    continue
+                all_rows.append({
+                    "raw_item_number": clean_text(item_number),
+                    "customer_item_number": customer_item,
+                    "item_id": normalize_item_id(clean_text(item_number), customer_item),
+                    "item_desc": desc,
+                    "Quantity": qty,
+                    "Unit Price": unit_price,
+                    "List Price": unit_price,
+                    "TotalSales": total_sales,
+                    "UOM": "",
+                    "Manufacturer": "",
+                    "manufacturer_part_number": "",
+                })
+    return all_rows
+
+
 def extract_pdf_rows(pdf_bytes: bytes, pdf_name: str) -> List[Dict[str, object]]:
     text_lines = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
@@ -384,7 +493,12 @@ def extract_pdf_rows(pdf_bytes: bytes, pdf_name: str) -> List[Dict[str, object]]
             text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
             text_lines.extend(text.splitlines())
     header = parse_header(text_lines, pdf_name)
-    items = extract_items(text_lines)
+
+    # Primary extractor: visual columns. Fallback: raw text parser.
+    items = extract_items_from_pdf_columns(pdf_bytes)
+    if not items:
+        items = extract_items(text_lines)
+
     rows = []
     for item in items:
         row = {h: "" for h in FIXED_HEADERS}
