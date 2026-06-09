@@ -18,4 +18,4 @@ streamlit run app.py
 
 ## Notes
 
-The extractor uses visual PDF column positions first, then falls back to text parsing. This fixes the issue where PDFs were found but 0 rows were extracted because the PDF text separated `Qty.` and `Ord.` into different text lines.
+The extractor uses visual PDF coordinates for both header blocks and item columns, then falls back to raw text parsing. Version 3 fixes these issues found in testing: bad Customer Number values from the logo address, mixed Sold-To/Ship-To addresses, lead-time notes appended to descriptions, and generic MISC/PARTS & MISC item IDs swallowing customer item numbers.

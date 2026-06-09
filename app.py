@@ -72,12 +72,24 @@ STOP_PHRASES = (
 )
 NOTE_PATTERNS = [
     re.compile(r"^est\.?\s+\d", re.I),
+    re.compile(r".*lead time.*", re.I),
     re.compile(r"^eta\s+", re.I),
     re.compile(r"^\d+\s*-\s*\d+\s*(day|days|week|weeks)", re.I),
     re.compile(r"^\d+\s*(day|days|week|weeks)\b", re.I),
     re.compile(r"^in stock", re.I),
+    re.compile(r".*in stock.*", re.I),
+    re.compile(r"^all .* are in", re.I),
+    re.compile(r"^quoted closest", re.I),
+    re.compile(r"^made to order", re.I),
+    re.compile(r"^remaining \(.*\) is", re.I),
+    re.compile(r"^\(\d+\)\s+are", re.I),
+    re.compile(r"^stock$", re.I),
+    re.compile(r"^length for", re.I),
+    re.compile(r"^determined$", re.I),
     re.compile(r"^stk\s+@", re.I),
     re.compile(r"^quote is for", re.I),
+    re.compile(r"^uses ", re.I),
+    re.compile(r"^includes:", re.I),
     re.compile(r"^new tool\s+\$", re.I),
     re.compile(r"^repair is\s+", re.I),
     re.compile(r"^cert from", re.I),
@@ -127,6 +139,9 @@ def parse_address_block(block_lines: List[str]) -> Dict[str, str]:
     for line in cleaned:
         emails.extend(EMAIL_RE.findall(line))
         stripped = EMAIL_RE.sub("", line)
+        # Remove operational notes from address parsing.
+        if re.search(r"(?i)send invoice|no pack slip|packages|keep packages|copy of po|inv thru coupa|invoice[s]? only|email both|email cc", stripped):
+            continue
         stripped = re.sub(r"(?i)email[:\-]?|<-.*|<--.*|\(email only\)|\(email\)|inv thru coupa|invoice[s]?.*", "", stripped)
         stripped = clean_text(stripped)
         if stripped:
@@ -199,47 +214,127 @@ def extract_header_blocks(lines: List[str]) -> Tuple[List[str], List[str]]:
     return block[:mid], block[mid:]
 
 
-def parse_header(lines: List[str], fallback_pdf_name: str) -> Dict[str, str]:
+
+def extract_visual_lines(page, bbox):
+    words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
+    left, top, right, bottom = bbox
+    selected = [w for w in words if left <= w["x0"] < right and top <= w["top"] < bottom]
+    lines = []
+    for w in sorted(selected, key=lambda x: (x["top"], x["x0"])):
+        placed = False
+        for line in lines:
+            if abs(line["top"] - w["top"]) <= 3:
+                line["words"].append(w)
+                line["top"] = min(line["top"], w["top"])
+                placed = True
+                break
+        if not placed:
+            lines.append({"top": w["top"], "words": [w]})
+    out = []
+    for line in sorted(lines, key=lambda x: x["top"]):
+        line["words"].sort(key=lambda x: x["x0"])
+        txt = clean_text(" ".join(w["text"] for w in line["words"]))
+        if txt:
+            out.append(txt)
+    return out
+
+
+def clean_header_block(lines: List[str]) -> List[str]:
+    out = []
+    for line in lines:
+        line = clean_text(line)
+        if not line or line.lower() in {"sold to:", "ship to:", "to:"}:
+            continue
+        out.append(line)
+    return out
+
+
+def extract_header_values_from_page(page) -> Dict[str, str]:
+    words = page.extract_words(x_tolerance=1, y_tolerance=3) or []
+
+    def box_text(left, top, right, bottom):
+        vals = [w for w in words if left <= w["x0"] < right and top <= w["top"] < bottom]
+        return clean_text(" ".join(w["text"] for w in sorted(vals, key=lambda x: (x["top"], x["x0"]))) )
+
+    # Right-top date/order box.
     quote_date = ""
     quote_number = ""
-    reference = ""
-    po_number = ""
-    customer_no = ""
-    salesperson = ""
-    ship_via = ""
-    terms = ""
-
-    for line in lines[:20]:
+    top_box = extract_visual_lines(page, (455, 15, 590, 70))
+    for line in top_box:
         m = re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\b", line)
-        if m and not quote_date:
+        if m:
             quote_date = m.group(0)
         m = re.search(r"\b(?:QT[\w\-]+|RQ[\w\-]+)\b", line)
         if m:
             quote_number = m.group(0)
 
-    # Header row is usually right before quote number: reference/po/customer/sales/ship/terms.
-    for i, line in enumerate(lines[:18]):
-        if quote_number and quote_number in line and i > 0:
-            prev = clean_text(lines[i - 1])
-            tokens = prev.split()
-            if len(tokens) >= 4:
-                # Parse from right: terms, ship via, salesperson, customer no, remaining reference/po
-                terms = tokens[-1]
-                ship_via = tokens[-2]
-                salesperson = tokens[-3]
-                customer_no = tokens[-4]
-                left = " ".join(tokens[:-4])
-                reference = left
-            break
+    # Bottom values in the header cells. Header labels are at y~234, values at y~243-252.
+    y1, y2 = 241, 254
+    reference = box_text(25, y1, 135, y2)
+    po_number = box_text(135, y1, 250, y2)
+    customer_no = box_text(250, y1, 320, y2)
+    salesperson = box_text(320, y1, 405, y2)
+    order_date = box_text(405, y1, 470, y2)
+    ship_via = box_text(470, y1, 520, y2)
+    terms = box_text(520, y1, 590, y2)
+    if order_date and not quote_date:
+        quote_date = order_date
 
-    # Visual table sometimes has reference + PO in left side; infer PO when obvious in reference text is not personal name.
-    if reference:
-        # Known behavior from user's manual entry: PO is the middle text when the left side contains name + PO.
-        pass
+    sold_lines = clean_header_block(extract_visual_lines(page, (25, 135, 300, 225)))
+    ship_lines = clean_header_block(extract_visual_lines(page, (295, 135, 590, 225)))
+    return {
+        "quote_date": quote_date,
+        "quote_number": quote_number,
+        "reference": reference,
+        "po_number": po_number,
+        "customer_no": customer_no,
+        "salesperson": salesperson,
+        "ship_via": ship_via,
+        "terms": terms,
+        "sold_lines": sold_lines,
+        "ship_lines": ship_lines,
+    }
 
-    sold_lines, ship_lines = extract_header_blocks(lines)
+
+def parse_header(lines: List[str], fallback_pdf_name: str, first_page=None) -> Dict[str, str]:
+    # Prefer visual extraction. Raw text ordering often mixes Sold-To and Ship-To blocks and causes bad addresses.
+    visual = extract_header_values_from_page(first_page) if first_page is not None else {}
+
+    quote_date = visual.get("quote_date", "")
+    quote_number = visual.get("quote_number", "")
+    reference = visual.get("reference", "")
+    po_number = visual.get("po_number", "")
+    customer_no = visual.get("customer_no", "")
+    salesperson = visual.get("salesperson", "")
+    ship_via = visual.get("ship_via", "")
+    terms = visual.get("terms", "")
+
+    # Fallback only for missing date/order number.
+    for line in lines[:25]:
+        if not quote_date:
+            m = re.search(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+\d{1,2},\s+\d{4}\b", line)
+            if m:
+                quote_date = m.group(0)
+        if not quote_number:
+            m = re.search(r"\b(?:QT[\w\-]+|RQ[\w\-]+)\b", line)
+            if m:
+                quote_number = m.group(0)
+
+    sold_lines = visual.get("sold_lines", [])
+    ship_lines = visual.get("ship_lines", [])
+    if not sold_lines or not ship_lines:
+        sold_lines, ship_lines = extract_header_blocks(lines)
+
     ship = parse_address_block(ship_lines or sold_lines)
     sold = parse_address_block(sold_lines)
+    # If Ship-To has only delivery instructions/person and no usable address, keep Ship-To company
+    # but fill missing address components from Sold-To.
+    ship_had_city = bool(ship.get("City") or ship.get("State") or ship.get("ZipCode"))
+    for field in ["Address", "City", "State", "ZipCode", "Country", "CountryName"]:
+        if not ship.get(field) and sold.get(field):
+            ship[field] = sold[field]
+    if not ship_had_city and sold.get("Address") and re.search(r"(?i)will deliver|deliver", ship.get("Address", "")):
+        ship["Address"] = sold.get("Address", "")
     if not ship.get("ContactEmail"):
         ship["ContactEmail"] = sold.get("ContactEmail", "")
 
@@ -261,7 +356,7 @@ def parse_header(lines: List[str], fallback_pdf_name: str) -> Dict[str, str]:
         "ZipCode": ship.get("ZipCode", ""),
         "CountryName": ship.get("CountryName", ""),
         "FirstName": ship.get("FirstName", ""),
-        "LastName": ship.get("LastName", ""),
+        "LastName": "",
         "ContactEmail": ship.get("ContactEmail", ""),
         "ContactPhone": "",
         "Webaddress": "",
@@ -280,7 +375,6 @@ def parse_header(lines: List[str], fallback_pdf_name: str) -> Dict[str, str]:
         "Terms": terms,
         "Reference": reference,
     }
-
 
 def split_item_fields(item_text: str) -> Tuple[str, str, str]:
     """Return item_number, customer_item_number, description."""
@@ -398,7 +492,28 @@ def group_words_by_line(words, y_tol: float = 3.0):
 
 
 def words_in_range(words, left: float, right: float) -> str:
-    return clean_text(" ".join(w["text"] for w in words if left <= w["x0"] < right))
+    parts = []
+    for w in words:
+        txt = w["text"]
+        x0, x1 = w["x0"], w["x1"]
+        if x1 <= left or x0 >= right:
+            continue
+        # Usually words are fully inside a column. If a very long token crosses a column
+        # boundary, split proportionally so customer-item text does not swallow description.
+        if x0 < left or x1 > right:
+            if len(txt) >= 12 and x1 > x0:
+                start_idx = max(0, int(round((max(left, x0) - x0) / (x1 - x0) * len(txt))))
+                end_idx = min(len(txt), int(round((min(right, x1) - x0) / (x1 - x0) * len(txt))))
+                piece = txt[start_idx:end_idx]
+                if piece:
+                    parts.append(piece)
+            else:
+                # For normal small tokens crossing by a point or two, keep it with its start column.
+                if left <= x0 < right:
+                    parts.append(txt)
+        else:
+            parts.append(txt)
+    return clean_text(" ".join(parts))
 
 
 def extract_items_from_pdf_columns(pdf_bytes: bytes) -> List[Dict[str, object]]:
@@ -488,11 +603,13 @@ def extract_items_from_pdf_columns(pdf_bytes: bytes) -> List[Dict[str, object]]:
 
 def extract_pdf_rows(pdf_bytes: bytes, pdf_name: str) -> List[Dict[str, object]]:
     text_lines = []
+    first_page = None
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        first_page = pdf.pages[0] if pdf.pages else None
         for page in pdf.pages:
             text = page.extract_text(x_tolerance=1, y_tolerance=3) or ""
             text_lines.extend(text.splitlines())
-    header = parse_header(text_lines, pdf_name)
+    header = parse_header(text_lines, pdf_name, first_page)
 
     # Primary extractor: visual columns. Fallback: raw text parser.
     items = extract_items_from_pdf_columns(pdf_bytes)
