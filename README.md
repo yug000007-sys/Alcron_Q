@@ -9,7 +9,7 @@ Streamlit app to upload Outlook `.msg` files, extract attached Alcorn quotation 
 
 PDFs are renamed using:
 
-`Alcorn_<CleanQuoteNumber>_<YYYYMMDD>_<HHMMSS>_<milliseconds>.pdf`
+`Alcorn_<CleanQuoteNumber>_<YYYYMMDD>.pdf`
 
 Examples:
 

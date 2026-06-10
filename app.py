@@ -1,7 +1,7 @@
 import io
 import re
 import zipfile
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Tuple
 
@@ -116,14 +116,39 @@ def clean_quote_for_filename(quote_number: str) -> str:
     return quote_number or "UNKNOWN"
 
 
-def make_pdf_output_name(quote_number: str, stamp_dt: datetime) -> str:
+def parse_quote_date_for_filename(date_value: str) -> datetime:
+    """Return a datetime for filename date. Falls back to today if parsing fails."""
+    date_value = clean_text(date_value)
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%m/%d/%Y", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(date_value, fmt)
+        except ValueError:
+            continue
+    return datetime.now()
+
+
+def make_pdf_output_name(quote_number: str, quote_date_value: str, used_names=None) -> str:
     """Build final renamed PDF name.
 
-    Format: Alcorn_<CleanQuoteNumber>_<YYYYMMDD>_<HHMMSS>_<milliseconds>.pdf
+    Format: Alcorn_<CleanQuoteNumber>_<YYYYMMDD>.pdf
+
+    The date is the quote date when available. If the same name appears more
+    than once in the same ZIP, _2, _3, etc. is added only for duplicates.
     """
     clean_quote = clean_quote_for_filename(quote_number)
-    milliseconds = stamp_dt.microsecond // 1000
-    return f"Alcorn_{clean_quote}_{stamp_dt:%Y%m%d}_{stamp_dt:%H%M%S}_{milliseconds:03d}.pdf"
+    quote_dt = parse_quote_date_for_filename(quote_date_value)
+    base_name = f"Alcorn_{clean_quote}_{quote_dt:%Y%m%d}.pdf"
+
+    if used_names is None:
+        return base_name
+
+    candidate = base_name
+    counter = 2
+    while candidate.lower() in used_names:
+        candidate = f"Alcorn_{clean_quote}_{quote_dt:%Y%m%d}_{counter}.pdf"
+        counter += 1
+    used_names.add(candidate.lower())
+    return candidate
 
 def money_to_float(value: str):
     if not value:
@@ -729,23 +754,24 @@ def main() -> None:
         errors: List[str] = []
         run_dt = datetime.now()
 
-        pdf_counter = 0
+        used_pdf_names = set()
         for msg_file in uploaded_msgs:
             try:
                 msg_bytes = msg_file.getvalue()
                 pdfs = extract_pdfs_from_msg(msg_bytes, run_dt)
                 for original_pdf_name, pdf_bytes in pdfs:
-                    pdf_counter += 1
                     try:
                         rows = extract_pdf_rows(pdf_bytes, original_pdf_name)
                         quote_number = ""
                         if rows:
                             quote_number = str(rows[0].get("QuoteNumber", ""))
 
-                        # Add 1 millisecond per PDF so duplicate quote numbers in the
-                        # same run still receive unique filenames.
-                        pdf_stamp = run_dt + timedelta(milliseconds=pdf_counter - 1)
-                        final_pdf_name = make_pdf_output_name(quote_number or original_pdf_name, pdf_stamp)
+                        quote_date = str(rows[0].get("QuoteDate", "")) if rows else ""
+                        final_pdf_name = make_pdf_output_name(
+                            quote_number or original_pdf_name,
+                            quote_date,
+                            used_pdf_names,
+                        )
 
                         # Ensure the Excel PDF column exactly matches the renamed PDF
                         # inside the ZIP.
