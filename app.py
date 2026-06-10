@@ -1,7 +1,7 @@
 import io
 import re
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Tuple
 
@@ -99,6 +99,31 @@ def clean_text(value: str) -> str:
     value = re.sub(r"\s+", " ", value).strip()
     return value
 
+
+
+
+def clean_quote_for_filename(quote_number: str) -> str:
+    """Return a filename-safe quote number.
+
+    Business rule: keep the quote readable, replace hyphens and other
+    non-alphanumeric characters with underscores, collapse repeated
+    underscores, and trim leading/trailing underscores.
+    Example: QT-ALCPT1698 -> QT_ALCPT1698.
+    """
+    quote_number = clean_text(quote_number)
+    quote_number = re.sub(r"[^A-Za-z0-9]+", "_", quote_number)
+    quote_number = re.sub(r"_+", "_", quote_number).strip("_")
+    return quote_number or "UNKNOWN"
+
+
+def make_pdf_output_name(quote_number: str, stamp_dt: datetime) -> str:
+    """Build final renamed PDF name.
+
+    Format: Alcorn_<CleanQuoteNumber>_<YYYYMMDD>_<HHMMSS>_<milliseconds>.pdf
+    """
+    clean_quote = clean_quote_for_filename(quote_number)
+    milliseconds = stamp_dt.microsecond // 1000
+    return f"Alcorn_{clean_quote}_{stamp_dt:%Y%m%d}_{stamp_dt:%H%M%S}_{milliseconds:03d}.pdf"
 
 def money_to_float(value: str):
     if not value:
@@ -656,9 +681,9 @@ def extract_pdfs_from_msg(msg_bytes: bytes, base_dt: datetime) -> List[Tuple[str
         data = attachment.data
         if not data:
             continue
-        stamp = base_dt.strftime("%Y%m%d_%H%M%S")
-        milli = f"{base_dt.microsecond // 1000:03d}"
-        safe_name = f"{PDF_PREFIX}_{stamp}_{milli}_{i:03d}.pdf"
+        # Keep the original attachment name temporarily. The final ZIP PDF name
+        # is created after parsing the quote number from the PDF.
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", original_name)
         pdfs.append((safe_name, data))
     return pdfs
 
@@ -704,17 +729,33 @@ def main() -> None:
         errors: List[str] = []
         run_dt = datetime.now()
 
+        pdf_counter = 0
         for msg_file in uploaded_msgs:
             try:
                 msg_bytes = msg_file.getvalue()
                 pdfs = extract_pdfs_from_msg(msg_bytes, run_dt)
-                all_pdfs.extend(pdfs)
-                for pdf_name, pdf_bytes in pdfs:
+                for original_pdf_name, pdf_bytes in pdfs:
+                    pdf_counter += 1
                     try:
-                        rows = extract_pdf_rows(pdf_bytes, pdf_name)
+                        rows = extract_pdf_rows(pdf_bytes, original_pdf_name)
+                        quote_number = ""
+                        if rows:
+                            quote_number = str(rows[0].get("QuoteNumber", ""))
+
+                        # Add 1 millisecond per PDF so duplicate quote numbers in the
+                        # same run still receive unique filenames.
+                        pdf_stamp = run_dt + timedelta(milliseconds=pdf_counter - 1)
+                        final_pdf_name = make_pdf_output_name(quote_number or original_pdf_name, pdf_stamp)
+
+                        # Ensure the Excel PDF column exactly matches the renamed PDF
+                        # inside the ZIP.
+                        for row in rows:
+                            row["PDF"] = final_pdf_name
+
+                        all_pdfs.append((final_pdf_name, pdf_bytes))
                         all_rows.extend(rows)
                     except Exception as exc:  # continue processing other PDFs
-                        errors.append(f"{pdf_name}: {exc}")
+                        errors.append(f"{original_pdf_name}: {exc}")
             except Exception as exc:
                 errors.append(f"{msg_file.name}: {exc}")
 

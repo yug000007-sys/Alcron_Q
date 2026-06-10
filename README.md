@@ -1,42 +1,31 @@
 # Alcorn MSG Quote Extractor
 
-Streamlit app to process Outlook `.msg` files containing Alcorn quote PDFs.
+Streamlit app to upload Outlook `.msg` files, extract attached Alcorn quotation PDFs in memory, parse line-item data into the fixed Excel layout, and download one ZIP containing:
 
-## What it does
+- `alcorn_quote_extraction.xlsx`
+- renamed PDFs in `/pdf/`
 
-- Upload one or more `.msg` files.
-- Extract attached PDFs in memory only.
-- Rename PDFs in the ZIP as `alcorn_YYYYMMDD_HHMMSS_mmm_###.pdf`.
-- Extract quote line items into a fixed-header Excel file.
-- Download one ZIP containing:
-  - `alcorn_quote_extraction.xlsx`
-  - renamed PDFs under `/pdf/`
+## PDF naming rule
 
-## Important data rules
+PDFs are renamed using:
 
-- Excel headers match the manual workbook layout.
-- `item_id` uses the PDF **Item Number** column exactly, e.g. `MISC`, `PARTS & MISC`, `DYNA 56177`.
-- Customer item numbers are used only for parsing descriptions, not exported as `item_id`.
-- `List Price` is blank.
-- `ContactEmail` uses only the first email in the **Ship To** block.
-- Ship-To address is used for company/address/city/state/zip/country.
-- ZIP+4 values are normalized to 5-digit ZIPs.
-- Lead-time notes are ignored unless they are part of the manual description rule, such as `STK @ VENDOR`.
-- `CustomerPONumber` is left blank to match the manual workbook.
-- PDF column is written as `Alcorn_<QuoteNumber>.pdf`.
+`Alcorn_<CleanQuoteNumber>_<YYYYMMDD>_<HHMMSS>_<milliseconds>.pdf`
 
-## Install
+Examples:
+
+- `Alcorn_QT00042198_20260610_143522_381.pdf`
+- `Alcorn_RQ8496_129_20260610_143522_382.pdf`
+- `Alcorn_QT_ALCPT1698_20260610_143522_383.pdf`
+
+Cleaning rule: all non-alphanumeric characters in the quote number are replaced with `_`, repeated underscores are collapsed, and leading/trailing underscores are removed. So `QT-ALCPT1698` becomes `QT_ALCPT1698`.
+
+## Run locally
 
 ```bash
 pip install -r requirements.txt
-```
-
-## Run
-
-```bash
 streamlit run app.py
 ```
 
 ## Privacy / storage
 
-The app does not write uploaded MSG or extracted PDF files to disk. Processing is done in memory. The final ZIP is created in memory for download.
+The app reads uploaded MSG/PDF content in memory and does not intentionally cache or persist PDFs. Output PDFs exist only inside the generated ZIP download.
