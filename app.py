@@ -19,21 +19,21 @@ PDF_PREFIX = "alcorn"
 
 FIXED_HEADERS = [
     "ReferralManagerCode",
-    "ReferralManagerName",
+    "ReferralManager",
     "ReferralEmail",
     "Brand",
     "QuoteNumber",
     "QuoteVersion",
     "QuoteDate",
-    "QuoteValidUntil",
+    "QuoteValidDate",
     "Customer Number/ID",
     "Company",
     "Address",
-    "Country",
+    "County",
     "City",
     "State",
     "ZipCode",
-    "CountryName",
+    "Country",
     "FirstName",
     "LastName",
     "ContactEmail",
@@ -46,8 +46,8 @@ FIXED_HEADERS = [
     "Unit Price",
     "List Price",
     "TotalSales",
-    "Manufacturer",
-    "manufacturer_part_number",
+    "Manufacturer_ID",
+    "manufacturer_Name",
     "Writer Name",
     "CustomerPONumber",
     "PDF",
@@ -56,9 +56,9 @@ FIXED_HEADERS = [
     "SIC",
     "NAICS",
     "LineOfBusiness",
-    "LinkedInProfile",
-    "PhoneResearch",
-    "PhoneSuppression",
+    "LinkedinProfile",
+    "PhoneResearched",
+    "PhoneSupplied",
     "ParentName",
 ]
 
@@ -76,8 +76,6 @@ NOTE_PATTERNS = [
     re.compile(r"^eta\s+", re.I),
     re.compile(r"^\d+\s*-\s*\d+\s*(day|days|week|weeks)", re.I),
     re.compile(r"^\d+\s*(day|days|week|weeks)\b", re.I),
-    re.compile(r"^in stock", re.I),
-    re.compile(r".*in stock.*", re.I),
     re.compile(r"^all .* are in", re.I),
     re.compile(r"^quoted closest", re.I),
     re.compile(r"^made to order", re.I),
@@ -86,7 +84,6 @@ NOTE_PATTERNS = [
     re.compile(r"^stock$", re.I),
     re.compile(r"^length for", re.I),
     re.compile(r"^determined$", re.I),
-    re.compile(r"^stk\s+@", re.I),
     re.compile(r"^quote is for", re.I),
     re.compile(r"^uses ", re.I),
     re.compile(r"^includes:", re.I),
@@ -132,6 +129,13 @@ def split_city_state_zip(line: str) -> Tuple[str, str, str, str]:
     return "", "", "", country
 
 
+
+def normalize_zip(zip_code: str) -> str:
+    zip_code = clean_text(zip_code)
+    # Manual XLSX uses 5-digit ZIPs for US ZIP+4 values.
+    m = re.match(r"^(\d{5})-\d{4}$", zip_code)
+    return m.group(1) if m else zip_code
+
 def parse_address_block(block_lines: List[str]) -> Dict[str, str]:
     cleaned = [clean_text(x) for x in block_lines if clean_text(x)]
     emails = []
@@ -162,7 +166,7 @@ def parse_address_block(block_lines: List[str]) -> Dict[str, str]:
             continue
         c, s, z, co = split_city_state_zip(line)
         if c or s or z:
-            city, state, zip_code = c, s, z
+            city, state, zip_code = c, s, normalize_zip(z)
             if co:
                 country = co
             continue
@@ -170,17 +174,21 @@ def parse_address_block(block_lines: List[str]) -> Dict[str, str]:
             continue
         address_parts.append(line)
 
+    # Manual-entry rule: department/role ATTN lines are not stored as FirstName,
+    # but a person name like "Eric" is kept.
+    if first_name and re.search(r"(?i)account|payable|receiv|department|dept|store|room|maintenance", first_name):
+        first_name = ""
     return {
         "Company": company,
         "Address": ", ".join(address_parts),
         "City": city,
         "State": state,
         "ZipCode": zip_code,
+        "County": "",
         "Country": country or "USA",
-        "CountryName": country or "USA",
         "FirstName": first_name,
         "LastName": "",
-        "ContactEmail": "; ".join(dict.fromkeys(emails)),
+        "ContactEmail": (list(dict.fromkeys(emails))[0] if emails else ""),
     }
 
 
@@ -296,6 +304,13 @@ def extract_header_values_from_page(page) -> Dict[str, str]:
     }
 
 
+
+def normalize_customer_no(value: str) -> str:
+    value = clean_text(value)
+    if re.fullmatch(r"0+\d+", value):
+        return str(int(value))
+    return value
+
 def parse_header(lines: List[str], fallback_pdf_name: str, first_page=None) -> Dict[str, str]:
     # Prefer visual extraction. Raw text ordering often mixes Sold-To and Ship-To blocks and causes bad addresses.
     visual = extract_header_values_from_page(first_page) if first_page is not None else {}
@@ -330,46 +345,45 @@ def parse_header(lines: List[str], fallback_pdf_name: str, first_page=None) -> D
     # If Ship-To has only delivery instructions/person and no usable address, keep Ship-To company
     # but fill missing address components from Sold-To.
     ship_had_city = bool(ship.get("City") or ship.get("State") or ship.get("ZipCode"))
-    for field in ["Address", "City", "State", "ZipCode", "Country", "CountryName"]:
+    for field in ["Address", "City", "State", "ZipCode", "Country"]:
         if not ship.get(field) and sold.get(field):
             ship[field] = sold[field]
     if not ship_had_city and sold.get("Address") and re.search(r"(?i)will deliver|deliver", ship.get("Address", "")):
         ship["Address"] = sold.get("Address", "")
-    if not ship.get("ContactEmail"):
-        ship["ContactEmail"] = sold.get("ContactEmail", "")
+    # Do not copy sold-to email into ContactEmail unless it also appears in Ship-To.
 
     return {
         "ReferralManagerCode": salesperson,
-        "ReferralManagerName": "",
+        "ReferralManager": "",
         "ReferralEmail": "",
         "Brand": "Alcorn Industrial Inc",
         "QuoteNumber": quote_number or fallback_pdf_name.rsplit(".", 1)[0],
         "QuoteVersion": "",
         "QuoteDate": quote_date,
-        "QuoteValidUntil": "",
-        "Customer Number/ID": customer_no,
+        "QuoteValidDate": "",
+        "Customer Number/ID": normalize_customer_no(customer_no),
         "Company": ship.get("Company", ""),
         "Address": ship.get("Address", ""),
-        "Country": ship.get("Country", ""),
+        "County": ship.get("County", ""),
         "City": ship.get("City", ""),
         "State": ship.get("State", ""),
         "ZipCode": ship.get("ZipCode", ""),
-        "CountryName": ship.get("CountryName", ""),
+        "Country": ship.get("Country", ""),
         "FirstName": ship.get("FirstName", ""),
         "LastName": "",
         "ContactEmail": ship.get("ContactEmail", ""),
         "ContactPhone": "",
         "Webaddress": "",
         "Writer Name": "",
-        "CustomerPONumber": po_number,
+        "CustomerPONumber": "",
         "DemoQuote": "",
         "Duns": "",
         "SIC": "",
         "NAICS": "",
         "LineOfBusiness": "",
-        "LinkedInProfile": "",
-        "PhoneResearch": "",
-        "PhoneSuppression": "",
+        "LinkedinProfile": "",
+        "PhoneResearched": "",
+        "PhoneSupplied": "",
         "ParentName": "",
         "ShipVia": ship_via,
         "Terms": terms,
@@ -407,10 +421,8 @@ def split_item_fields(item_text: str) -> Tuple[str, str, str]:
 
 
 def normalize_item_id(item_number: str, customer_item: str) -> str:
-    # User-validated rule: if item number is generic, use real customer item number.
-    generic = {"MISC", "PARTS & MISC"}
-    if item_number.upper() in generic and customer_item:
-        return customer_item
+    # Manual-entry rule confirmed from comparison: item_id is the PDF Item Number column.
+    # Customer Item Number is not exported to the fixed CRM sheet.
     return item_number
 
 
@@ -450,7 +462,7 @@ def extract_items(lines: List[str]) -> List[Dict[str, object]]:
                 "item_desc": desc,
                 "Quantity": qty,
                 "Unit Price": unit_price,
-                "List Price": unit_price,
+                "List Price": "",
                 "TotalSales": total,
                 "UOM": "",
                 "Manufacturer": "",
@@ -592,11 +604,11 @@ def extract_items_from_pdf_columns(pdf_bytes: bytes) -> List[Dict[str, object]]:
                     "item_desc": desc,
                     "Quantity": qty,
                     "Unit Price": unit_price,
-                    "List Price": unit_price,
+                    "List Price": "",
                     "TotalSales": total_sales,
                     "UOM": "",
-                    "Manufacturer": "",
-                    "manufacturer_part_number": "",
+                    "Manufacturer_ID": "",
+                    "manufacturer_Name": "",
                 })
     return all_rows
 
@@ -622,9 +634,9 @@ def extract_pdf_rows(pdf_bytes: bytes, pdf_name: str) -> List[Dict[str, object]]
         for key, value in header.items():
             if key in row:
                 row[key] = value
-        for key in ["item_id", "item_desc", "UOM", "Quantity", "Unit Price", "List Price", "TotalSales", "Manufacturer", "manufacturer_part_number"]:
+        for key in ["item_id", "item_desc", "UOM", "Quantity", "Unit Price", "List Price", "TotalSales", "Manufacturer_ID", "manufacturer_Name"]:
             row[key] = item.get(key, "")
-        row["PDF"] = pdf_name
+        row["PDF"] = f"Alcorn_{header.get('QuoteNumber', '').strip()}.pdf" if header.get('QuoteNumber') else pdf_name
         rows.append(row)
     return rows
 
